@@ -15,7 +15,6 @@
 | **SyncLRC** | Primary lyrics API: `synclrc.tharuk.pro`. Provides karaoke, synced, and plain lyrics. |
 | **LRCLIB** | Fallback lyrics API: `lrclib.net`. Provides synced and plain lyrics. |
 | **Musixmatch** | Unofficial anonymous mobile API (`apic-appmobile.musixmatch.com`). Provides RichSync (word timing) and line-synced lyrics. |
-| **Player image** (AA) | The bitmap sent as album art: song + artist at the top, the previous lyric line below. Fills the slot where the full-screen player would draw a placeholder. |
 | **AA offset** | A separate lyrics delay setting specific to Android Auto, stored as `aa_offset_ms` in SharedPreferences. |
 | **Phone sync** | The global lyrics offset applied on the phone, managed by `MediaTracker.offsetMs`. |
 
@@ -133,10 +132,8 @@ What Android Auto shows from the MediaSession, as tested on the Desktop Head Uni
 
 - The full-screen player and the small media card show only `DISPLAY_TITLE` and `DISPLAY_SUBTITLE`,
   one line each; line breaks are cut off. Album, description and queue title are not shown.
-- Without album art the player draws an empty placeholder square. `ALBUM_ART` is therefore always
-  the player image (transparent background), which removes the square and carries the extra lines.
-- The small media card uses the same image as a dimmed, center-cropped background, so the
-  previous line is drawn narrow and kept clear of the card's own two lines.
+- `ALBUM_ART` is the source player's cover. Without it the player draws an empty placeholder
+  square; the small media card uses it as a dimmed, center-cropped background.
 - Play/pause/skip disappear when the playback state offers no transport actions; the progress
   bar disappears without `METADATA_KEY_DURATION` and with an unknown position.
 
@@ -188,7 +185,7 @@ Debug builds accept a broadcast that replaces the media metadata until cleared, 
 Android Auto lays out a field without changing code:
 
 ```powershell
-adb shell "am broadcast -a com.autolyrics.DEBUG_METADATA --es display_title 'Big line' --es display_subtitle 'Small line' --es image_song 'Song' --es image_artist 'Artist' --es image_previous 'Previous line' --el duration 200000"
+adb shell "am broadcast -a com.autolyrics.DEBUG_METADATA --es display_title 'Big line' --es display_subtitle 'Small line' --el duration 200000"
 adb shell am broadcast -a com.autolyrics.DEBUG_METADATA --ez clear true
 ```
 

@@ -91,7 +91,6 @@ class LyricsBrowserService : MediaBrowserServiceCompat() {
         private const val PREVIOUS_SONG_DELAY_MS = 350L
         /** About two lines of the media card's big title text. */
         private const val CARD_MAX_CHARS = 34
-        private const val PLAYER_IMAGE_SIZE = 600
         private const val LAST_LINE_MS = 6_000L
         private const val WINDOW_SIZE = 3
         private const val PLAIN_WINDOW_SIZE = 4
@@ -499,11 +498,8 @@ class LyricsBrowserService : MediaBrowserServiceCompat() {
 
     // --- Media card (the small player next to Maps) ---
 
-    /**
-     * Big bold line and small line on the media card, plus what was sung just
-     * before them, which the full-screen player shows above them.
-     */
-    private data class CardText(val title: String, val subtitle: String, val previous: String = "")
+    /** Big bold line and small line on the media card. */
+    private data class CardText(val title: String, val subtitle: String)
 
     private fun songLabel(state: LyricsState): String {
         val track = state.track ?: return ""
@@ -516,17 +512,6 @@ class LyricsBrowserService : MediaBrowserServiceCompat() {
         val roman = state.romanizedLines?.getOrNull(index)?.takeIf { it.isNotBlank() }
         return (roman ?: line.text).ifBlank { "♪" }
     }
-
-    private fun previousVocalIndex(lines: List<LyricLine>, before: Int): Int {
-        for (i in (before - 1) downTo 0) {
-            if (Countdown.isVocal(lines[i])) return i
-        }
-        return -1
-    }
-
-    /** The line sung before [index], or "" at the start of the song. */
-    private fun previousText(state: LyricsState, index: Int): String =
-        previousVocalIndex(state.lines, index).takeIf { it >= 0 }?.let { singText(state, it) }.orEmpty()
 
     private fun nextVocalIndex(lines: List<LyricLine>, after: Int): Int {
         for (i in (after + 1) until lines.size) {
@@ -551,8 +536,7 @@ class LyricsBrowserService : MediaBrowserServiceCompat() {
             if (countdown.dots > 0) {
                 return CardText(
                     countdownDots(countdown.dots),
-                    firstChunk(singText(state, countdown.nextIndex)),
-                    previousText(state, countdown.nextIndex)
+                    firstChunk(singText(state, countdown.nextIndex))
                 )
             }
             val idx = findLineIndex(lines, posMs)
@@ -568,9 +552,7 @@ class LyricsBrowserService : MediaBrowserServiceCompat() {
             val upNext = pos.chunks.getOrNull(pos.index + 1)
                 ?: nextVocalIndex(lines, idx).takeIf { it >= 0 }?.let { firstChunk(singText(state, it)) }
                 ?: song
-            // Mid-line, the piece just sung is the "previous" one.
-            val previous = pos.chunks.getOrNull(pos.index - 1) ?: previousText(state, idx)
-            return CardText(pos.chunks[pos.index], upNext, previous)
+            return CardText(pos.chunks[pos.index], upNext)
         }
 
         if (state.status == LyricsStatus.PLAIN_ONLY && lines.isNotEmpty()) {
@@ -584,8 +566,7 @@ class LyricsBrowserService : MediaBrowserServiceCompat() {
             val pos = chunkPosition(singText(state, idx), null, startMs, startMs + perLineMs, posMs)
             val upNext = pos.chunks.getOrNull(pos.index + 1)
                 ?: if (idx + 1 < lines.size) firstChunk(singText(state, idx + 1)) else song
-            val previous = pos.chunks.getOrNull(pos.index - 1) ?: if (idx > 0) singText(state, idx - 1) else ""
-            return CardText(pos.chunks[pos.index], upNext, previous)
+            return CardText(pos.chunks[pos.index], upNext)
         }
 
         val status = when (state.status) {
@@ -710,16 +691,6 @@ class LyricsBrowserService : MediaBrowserServiceCompat() {
                     b.putBitmap(MediaMetadataCompat.METADATA_KEY_ALBUM_ART, it)
                 }
             }
-            if (intent.hasExtra("image_song") || intent.hasExtra("image_previous")) {
-                b.putBitmap(
-                    MediaMetadataCompat.METADATA_KEY_ALBUM_ART,
-                    drawPlayerImage(
-                        intent.getStringExtra("image_song").orEmpty(),
-                        intent.getStringExtra("image_artist").orEmpty(),
-                        intent.getStringExtra("image_previous").orEmpty()
-                    )
-                )
-            }
             if (intent.hasExtra("duration")) {
                 b.putLong(MediaMetadataCompat.METADATA_KEY_DURATION, intent.getLongExtra("duration", 0L))
             }
@@ -737,81 +708,10 @@ class LyricsBrowserService : MediaBrowserServiceCompat() {
         }
     }
 
-    // --- Full-screen player image ---
-
-    private var playerImageKey: String? = null
-    private var playerImage: Bitmap? = null
-
-    /**
-     * The car's full-screen player shows only two lines of text, under a square
-     * meant for album art. Instead of art, that square gets the song and artist at
-     * the top and the line sung before the big text at the bottom. Its transparent
-     * background also stops the car drawing an empty placeholder there.
-     */
-    private fun playerImageFor(state: LyricsState, card: CardText): Bitmap {
-        val track = state.track
-        val song = track?.title.orEmpty()
-        val artist = track?.artist.orEmpty()
-        val key = "$song\n$artist\n${card.previous}"
-        playerImage?.takeIf { key == playerImageKey }?.let { return it }
-        return drawPlayerImage(song, artist, card.previous).also {
-            playerImageKey = key
-            playerImage = it
-        }
-    }
-
-    private fun drawPlayerImage(song: String, artist: String, previous: String): Bitmap {
-        val size = PLAYER_IMAGE_SIZE
-        val bmp = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
-        val canvas = android.graphics.Canvas(bmp)
-        fun layout(text: String, sizePx: Float, alpha: Int, bold: Boolean, maxLines: Int, width: Int) =
-            android.text.StaticLayout.Builder
-                .obtain(text, 0, text.length, android.text.TextPaint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
-                    color = android.graphics.Color.argb(alpha, 255, 255, 255)
-                    textSize = sizePx
-                    typeface = if (bold) android.graphics.Typeface.DEFAULT_BOLD else android.graphics.Typeface.DEFAULT
-                }, width)
-                .setAlignment(android.text.Layout.Alignment.ALIGN_CENTER)
-                .setMaxLines(maxLines)
-                .setEllipsize(android.text.TextUtils.TruncateAt.END)
-                .build()
-
-        fun draw(l: android.text.StaticLayout, top: Float) {
-            canvas.save()
-            canvas.translate((size - l.width) / 2f, top)
-            l.draw(canvas)
-            canvas.restore()
-        }
-
-        // Song and artist across the top.
-        val headerWidth = (size * 0.88f).toInt()
-        var y = size * 0.06f
-        if (song.isNotBlank()) {
-            val l = layout(song, size * 0.085f, 235, bold = true, maxLines = 2, width = headerWidth)
-            draw(l, y)
-            y += l.height + size * 0.015f
-        }
-        if (artist.isNotBlank()) {
-            draw(layout(artist, size * 0.07f, 170, bold = false, maxLines = 1, width = headerWidth), y)
-        }
-
-        // The previous line sits low, just above where the big text starts. On the
-        // small media card the image becomes a background cropped to its middle, so
-        // the line is kept narrow and ends a little above the card's own text.
-        if (previous.isNotBlank()) {
-            val l = layout(
-                previous, size * 0.07f, 150, bold = false, maxLines = 3, width = (size * 0.7f).toInt()
-            )
-            draw(l, size * 0.74f - l.height)
-        }
-        return bmp
-    }
-
     // --- MediaSession management ---
 
     /**
-     * Metadata for the car's player and media card. Instead of album art the player
-     * gets [playerImageFor]; the browse header still shows the real art.
+     * Metadata for the car's player and media card.
      */
     private fun buildMetadata(state: LyricsState, card: CardText): MediaMetadataCompat {
         val metaBuilder = MediaMetadataCompat.Builder()
@@ -825,8 +725,11 @@ class LyricsBrowserService : MediaBrowserServiceCompat() {
                 metaBuilder.putLong(MediaMetadataCompat.METADATA_KEY_DURATION, track.durationMs)
             }
         }
-        state.albumArt?.let { lastAlbumArt = it }
-        metaBuilder.putBitmap(MediaMetadataCompat.METADATA_KEY_ALBUM_ART, playerImageFor(state, card))
+        val art = state.albumArt ?: lastAlbumArt
+        if (art != null) {
+            metaBuilder.putBitmap(MediaMetadataCompat.METADATA_KEY_ALBUM_ART, art)
+            lastAlbumArt = art
+        }
 
         if (card.title.isNotBlank()) {
             metaBuilder.putString(MediaMetadataCompat.METADATA_KEY_DISPLAY_TITLE, card.title)
