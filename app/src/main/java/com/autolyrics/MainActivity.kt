@@ -206,6 +206,20 @@ class MainActivity : AppCompatActivity() {
             mediaTracker.refreshRomanization()
         }
 
+        findViewById<SwitchCompat>(R.id.switch_musixmatch).apply {
+            isChecked = prefs.getBoolean("musixmatch_enabled", true)
+            setOnCheckedChangeListener { _, isChecked ->
+                prefs.edit().putBoolean("musixmatch_enabled", isChecked).apply()
+            }
+        }
+
+        findViewById<SwitchCompat>(R.id.switch_aa_hide_controls).apply {
+            isChecked = prefs.getBoolean("aa_hide_controls", false)
+            setOnCheckedChangeListener { _, isChecked ->
+                prefs.edit().putBoolean("aa_hide_controls", isChecked).apply()
+            }
+        }
+
         findViewById<Button>(R.id.btn_aa_delay_minus).setOnClickListener {
             aaOffsetMs -= 100
             prefs.edit().putLong("aa_offset_ms", aaOffsetMs).apply()

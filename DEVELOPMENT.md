@@ -14,6 +14,8 @@
 | **Plain lyrics** / **Unsynced** | No timestamps. `LyricsStatus.PLAIN_ONLY`. Scrolled proportionally based on song duration. |
 | **SyncLRC** | Primary lyrics API: `synclrc.tharuk.pro`. Provides karaoke, synced, and plain lyrics. |
 | **LRCLIB** | Fallback lyrics API: `lrclib.net`. Provides synced and plain lyrics. |
+| **Musixmatch** | Unofficial anonymous mobile API (`apic-appmobile.musixmatch.com`). Provides RichSync (word timing) and line-synced lyrics. |
+| **Player image** (AA) | The bitmap sent as album art: song + artist at the top, the previous lyric line below. Fills the slot where the full-screen player would draw a placeholder. |
 | **AA offset** | A separate lyrics delay setting specific to Android Auto, stored as `aa_offset_ms` in SharedPreferences. |
 | **Phone sync** | The global lyrics offset applied on the phone, managed by `MediaTracker.offsetMs`. |
 
@@ -56,6 +58,7 @@ AutoLyricsApp (Application)
 | `media/MediaListenerService.kt` | `NotificationListenerService` — detects media sessions. |
 | `lyrics/SyncLrcClient.kt` | HTTP client for SyncLRC API (primary source). |
 | `lyrics/LrcLibClient.kt` | HTTP client for LRCLIB API (fallback source). |
+| `lyrics/MusixmatchClient.kt` | Musixmatch mobile API: token, macro.subtitles.get, RichSync. Ported from the whoxamxl/auto-lyrics fork. |
 | `lyrics/LrcParser.kt` | Parses LRC and ELRC format strings into `LyricLine` lists. |
 | `lyrics/MetadataCleaner.kt` | Normalizes track/artist strings for API queries. |
 | `lyrics/LyricsCache.kt` | In-memory lyrics cache with background refresh and queue pre-fetching. |
@@ -106,6 +109,8 @@ AutoLyricsApp (Application)
 | `lyrics_font_family` | String | `sans-serif` | Phone lyrics font family. |
 | `aa_karaoke_enabled` | Boolean | true | Toggle karaoke bracket display on AA. |
 | `aa_offset_ms` | Long | 0 | Android Auto-specific lyrics delay (ms). |
+| `aa_hide_controls` | Boolean | false | Hide play/pause/skip and the progress bar on the car's player and media card. |
+| `musixmatch_enabled` | Boolean | true | Include Musixmatch in the lookup. |
 
 ## Karaoke Bracket Logic (AA)
 
@@ -117,6 +122,64 @@ The bracket display uses **monotonic advancement** to avoid visual jitter:
 
 ## Lyrics Fetch Priority
 
-1. **SyncLRC** (`synclrc.tharuk.pro`) — returns karaoke (ELRC), synced (LRC), or plain text.
-2. **LRCLIB** (`lrclib.net`) — fallback, returns synced (LRC) or plain text.
-3. Within a response, preference: karaoke > synced > plain.
+1. A match the user picked with "Wrong lyrics?" (LRCLIB id).
+2. **SyncLRC** karaoke (ELRC word timing).
+3. **Musixmatch** RichSync or line-synced lyrics (if `musixmatch_enabled`).
+4. **SyncLRC** synced/plain, then **LRCLIB** synced/plain.
+
+## Android Auto screens
+
+What Android Auto shows from the MediaSession, as tested on the Desktop Head Unit:
+
+- The full-screen player and the small media card show only `DISPLAY_TITLE` and `DISPLAY_SUBTITLE`,
+  one line each; line breaks are cut off. Album, description and queue title are not shown.
+- Without album art the player draws an empty placeholder square. `ALBUM_ART` is therefore always
+  the player image (transparent background), which removes the square and carries the extra lines.
+- The small media card uses the same image as a dimmed, center-cropped background, so the
+  previous line is drawn narrow and kept clear of the card's own two lines.
+- Play/pause/skip disappear when the playback state offers no transport actions; the progress
+  bar disappears without `METADATA_KEY_DURATION` and with an unknown position.
+
+## Testing Android Auto on the PC
+
+One-time setup (JDK 17, SDK, adb, Desktop Head Unit):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\tools\install-sdk.ps1
+```
+
+**With a phone over USB**
+
+1. Phone: enable *USB debugging*; in Android Auto settings tap *Version* 10× → ⋮ → *Developer settings* → *Unknown sources*.
+   Then ⋮ → *Start head unit server* (German: „Server für Haupteinheit starten“).
+2. `.\tools\run.ps1 -Serial <serial>` builds, installs, restarts the app and tails its logs.
+3. `.\tools\start-dhu.ps1 -Serial <serial>` opens the car screen (`-Config widescreen|portrait|default`).
+
+**Without a phone**: `.\tools\start-emulator.ps1` boots the `AutoTest` AVD (Android 14 + Play Store).
+Sign in, install Android Auto from the Play Store, then use the same steps with `-Serial emulator-5554`.
+
+**Test Player** (`testplayer/`): a silent fake music app, so no music subscription or sign-in is needed.
+
+```powershell
+adb shell am start-foreground-service -n com.autolyrics.testplayer/.PlayerService -a play --ei song 0
+adb shell am start-foreground-service -n com.autolyrics.testplayer/.PlayerService -a seek --el pos 60000
+```
+
+**Head unit console**: the DHU window's terminal accepts commands such as `screenshot out.png`,
+`tap 640 360`, `day` / `night` and `help`.
+
+**Debugging**: open the project in Android Studio and use *Attach Debugger to Android Process* →
+`com.autolyrics`, or watch `adb logcat -s AutoLyricsAA Musixmatch`.
+
+### Probing the car screen
+
+Debug builds accept a broadcast that replaces the media metadata until cleared, to see how
+Android Auto lays out a field without changing code:
+
+```powershell
+adb shell "am broadcast -a com.autolyrics.DEBUG_METADATA --es display_title 'Big line' --es display_subtitle 'Small line' --es image_song 'Song' --es image_artist 'Artist' --es image_previous 'Previous line' --el duration 200000"
+adb shell am broadcast -a com.autolyrics.DEBUG_METADATA --ez clear true
+```
+
+Other extras: `title`, `artist`, `album`, `display_description`, `queue_title`, `art` (real album art),
+`actions` (playback actions bitmask).
