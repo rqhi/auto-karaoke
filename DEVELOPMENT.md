@@ -109,6 +109,7 @@ AutoLyricsApp (Application)
 | `aa_karaoke_enabled` | Boolean | true | Toggle karaoke bracket display on AA. |
 | `aa_offset_ms` | Long | 0 | Android Auto-specific lyrics delay (ms). |
 | `aa_hide_controls` | Boolean | false | Hide play/pause/skip and the progress bar on the car's player and media card. |
+| `aa_show_cover_art` | Boolean | true | Send the song's cover to the car; when off, a transparent image is sent instead. |
 | `musixmatch_enabled` | Boolean | true | Include Musixmatch in the lookup. |
 
 ## Karaoke Bracket Logic (AA)
@@ -136,6 +137,8 @@ What Android Auto shows from the MediaSession, as tested on the Desktop Head Uni
   square; the small media card uses it as a dimmed, center-cropped background.
 - Play/pause/skip disappear when the playback state offers no transport actions; the progress
   bar disappears without `METADATA_KEY_DURATION` and with an unknown position.
+- The default media button handling ignores keys whose action is missing from the playback state,
+  so `onMediaButtonEvent` handles steering wheel and headset keys itself.
 
 ## Testing Android Auto on the PC
 

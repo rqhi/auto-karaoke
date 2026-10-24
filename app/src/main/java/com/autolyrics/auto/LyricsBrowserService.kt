@@ -12,6 +12,7 @@ import android.media.session.PlaybackState
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.view.KeyEvent
 import android.util.Log
 import android.support.v4.media.MediaBrowserCompat
 import android.support.v4.media.MediaDescriptionCompat
@@ -49,6 +50,7 @@ class LyricsBrowserService : MediaBrowserServiceCompat() {
     private var aaKaraokeEnabled = true
     private var aaOffsetMs = 0L
     private var aaHideControls = false
+    private var aaShowCoverArt = true
 
     private var lastKaraokeLineIdx = -1
     private var lastKaraokeWordIdx = -1
@@ -65,8 +67,9 @@ class LyricsBrowserService : MediaBrowserServiceCompat() {
                     aaOffsetMs = sp.getLong(key, 0L)
                     forceRefresh()
                 }
-                "aa_hide_controls" -> {
-                    aaHideControls = sp.getBoolean(key, false)
+                "aa_hide_controls", "aa_show_cover_art" -> {
+                    aaHideControls = sp.getBoolean("aa_hide_controls", false)
+                    aaShowCoverArt = sp.getBoolean("aa_show_cover_art", true)
                     val state = mediaTracker.state.value
                     mediaSession.setMetadata(buildMetadata(state, getCardText(state)))
                     mediaSession.setPlaybackState(buildPlaybackState(state))
@@ -110,6 +113,7 @@ class LyricsBrowserService : MediaBrowserServiceCompat() {
         aaKaraokeEnabled = prefs.getBoolean("aa_karaoke_enabled", true)
         aaOffsetMs = prefs.getLong("aa_offset_ms", 0L)
         aaHideControls = prefs.getBoolean("aa_hide_controls", false)
+        aaShowCoverArt = prefs.getBoolean("aa_show_cover_art", true)
         prefs.registerOnSharedPreferenceChangeListener(prefsListener)
 
         mediaSession = MediaSessionCompat(this, "AutoLyrics").apply {
@@ -726,9 +730,12 @@ class LyricsBrowserService : MediaBrowserServiceCompat() {
             }
         }
         val art = state.albumArt ?: lastAlbumArt
-        if (art != null) {
-            metaBuilder.putBitmap(MediaMetadataCompat.METADATA_KEY_ALBUM_ART, art)
-            lastAlbumArt = art
+        if (art != null) lastAlbumArt = art
+        // With no art at all the car draws a placeholder square, so a hidden cover is
+        // sent as a transparent image instead.
+        val shownArt = if (aaShowCoverArt) art else blankArt
+        if (shownArt != null) {
+            metaBuilder.putBitmap(MediaMetadataCompat.METADATA_KEY_ALBUM_ART, shownArt)
         }
 
         if (card.title.isNotBlank()) {
@@ -739,6 +746,8 @@ class LyricsBrowserService : MediaBrowserServiceCompat() {
         }
         return metaBuilder.build()
     }
+
+    private val blankArt: Bitmap by lazy { Bitmap.createBitmap(8, 8, Bitmap.Config.ARGB_8888) }
 
     private fun updateMediaSession(state: LyricsState) {
         val trackChanged = state.track?.title != displayedTrackTitle
@@ -924,6 +933,29 @@ class LyricsBrowserService : MediaBrowserServiceCompat() {
     }
 
     private inner class SessionCallback : MediaSessionCompat.Callback() {
+        /**
+         * Steering wheel and headset buttons. The default handling drops a key when the
+         * playback state leaves out its action, which "Hide playback controls" does.
+         */
+        override fun onMediaButtonEvent(mediaButtonEvent: Intent?): Boolean {
+            @Suppress("DEPRECATION")
+            val event = mediaButtonEvent?.getParcelableExtra<KeyEvent>(Intent.EXTRA_KEY_EVENT)
+                ?: return super.onMediaButtonEvent(mediaButtonEvent)
+            if (event.action != KeyEvent.ACTION_DOWN) return true
+            when (event.keyCode) {
+                KeyEvent.KEYCODE_MEDIA_PLAY -> onPlay()
+                KeyEvent.KEYCODE_MEDIA_PAUSE -> onPause()
+                KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE, KeyEvent.KEYCODE_HEADSETHOOK ->
+                    if (mediaTracker.state.value.isPlaying) onPause() else onPlay()
+                KeyEvent.KEYCODE_MEDIA_NEXT -> onSkipToNext()
+                KeyEvent.KEYCODE_MEDIA_PREVIOUS -> onSkipToPrevious()
+                KeyEvent.KEYCODE_MEDIA_STOP -> onStop()
+                else -> return super.onMediaButtonEvent(mediaButtonEvent)
+            }
+            Log.d(TAG, "media button ${KeyEvent.keyCodeToString(event.keyCode)}")
+            return true
+        }
+
         override fun onPlay() {
             getActiveMediaController()?.transportControls?.play()
         }

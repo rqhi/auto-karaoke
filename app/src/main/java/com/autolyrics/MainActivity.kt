@@ -220,6 +220,13 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        findViewById<SwitchCompat>(R.id.switch_aa_show_cover_art).apply {
+            isChecked = prefs.getBoolean("aa_show_cover_art", true)
+            setOnCheckedChangeListener { _, isChecked ->
+                prefs.edit().putBoolean("aa_show_cover_art", isChecked).apply()
+            }
+        }
+
         findViewById<Button>(R.id.btn_aa_delay_minus).setOnClickListener {
             aaOffsetMs -= 100
             prefs.edit().putLong("aa_offset_ms", aaOffsetMs).apply()
