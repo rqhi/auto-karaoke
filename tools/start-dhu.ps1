@@ -3,9 +3,10 @@
 #   .\tools\start-dhu.ps1                 # the only connected device
 #   .\tools\start-dhu.ps1 -Serial emulator-5554
 #   .\tools\start-dhu.ps1 -Config portrait   # tall screen, see tools\dhu\*.ini
+#   .\tools\start-dhu.ps1 -Config enyaq      # Skoda Enyaq layout
 param(
     [string]$Serial,
-    [ValidateSet('default', '720p', 'portrait', 'widescreen')][string]$Config = '720p'
+    [ValidateSet('default', '720p', 'enyaq', 'portrait', 'widescreen')][string]$Config = '720p'
 )
 . "$PSScriptRoot\env.ps1"
 

@@ -139,6 +139,12 @@ What Android Auto shows from the MediaSession, as tested on the Desktop Head Uni
   bar disappears without `METADATA_KEY_DURATION` and with an unknown position.
 - The default media button handling ignores keys whose action is missing from the playback state,
   so `onMediaButtonEvent` handles steering wheel and headset keys itself.
+- On a landscape car screen the full-screen player puts the two lines and the controls on the
+  left and the album art on the right. Android Auto always left-aligns those lines; leading
+  no-break spaces would shift them, but the same lines also feed the narrow media card, where
+  they would push the text out of view, so the text is not centered when the cover is hidden.
+- The round icon at the top left of the player (and in the launcher) is the app icon. Android
+  Auto draws it on a white circle, so a transparent icon only leaves an empty white circle.
 
 ## Testing Android Auto on the PC
 
@@ -153,10 +159,16 @@ powershell -ExecutionPolicy Bypass -File .\tools\install-sdk.ps1
 1. Phone: enable *USB debugging*; in Android Auto settings tap *Version* 10× → ⋮ → *Developer settings* → *Unknown sources*.
    Then ⋮ → *Start head unit server* (German: „Server für Haupteinheit starten“).
 2. `.\tools\run.ps1 -Serial <serial>` builds, installs, restarts the app and tails its logs.
-3. `.\tools\start-dhu.ps1 -Serial <serial>` opens the car screen (`-Config widescreen|portrait|default`).
+3. `.\tools\start-dhu.ps1 -Serial <serial>` opens the car screen (`-Config enyaq|widescreen|portrait|default`).
 
-**Without a phone**: `.\tools\start-emulator.ps1` boots the `AutoTest` AVD (Android 14 + Play Store).
-Sign in, install Android Auto from the Play Store, then use the same steps with `-Serial emulator-5554`.
+`-Config enyaq` matches a Skoda Enyaq (13" screen, MY2027): launcher bar at the bottom, Maps
+with a narrow media card next to it, and opened apps filling the screen. The layout follows the
+reported dpi; at 160-200 dpi Android Auto uses a left rail instead, as in the `720p` config.
+
+**Without a phone**: `.\tools\start-emulator.ps1` boots an emulator with Google Play (`-Avd <name>`).
+Play no longer offers Android Auto on emulators, so copy it from a connected phone that has it:
+`.\tools\copy-aa-to-emulator.ps1 -Phone <serial> -Emulator emulator-5554`. Then use the same steps
+with the emulator's serial.
 
 **Test Player** (`testplayer/`): a silent fake music app, so no music subscription or sign-in is needed.
 
@@ -166,7 +178,8 @@ adb shell am start-foreground-service -n com.autolyrics.testplayer/.PlayerServic
 ```
 
 **Head unit console**: the DHU window's terminal accepts commands such as `screenshot out.png`,
-`tap 640 360`, `day` / `night` and `help`.
+`tap 640 360`, `keycode media_next` / `keycode media_play_pause` (steering wheel buttons),
+`day` / `night` and `help`.
 
 **Debugging**: open the project in Android Studio and use *Attach Debugger to Android Process* →
 `com.autolyrics`, or watch `adb logcat -s AutoLyricsAA Musixmatch`.
@@ -190,6 +203,12 @@ Android Auto lays out a field without changing code:
 ```powershell
 adb shell "am broadcast -a com.autolyrics.DEBUG_METADATA --es display_title 'Big line' --es display_subtitle 'Small line' --el duration 200000"
 adb shell am broadcast -a com.autolyrics.DEBUG_METADATA --ez clear true
+```
+
+Debug builds also flip boolean settings, such as the cover and controls switches:
+
+```powershell
+adb shell am broadcast -a com.autolyrics.DEBUG_METADATA --es pref aa_show_cover_art --ez value false
 ```
 
 Other extras: `title`, `artist`, `album`, `display_description`, `queue_title`, `art` (real album art),

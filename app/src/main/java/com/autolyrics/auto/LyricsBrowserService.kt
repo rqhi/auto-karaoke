@@ -666,6 +666,13 @@ class LyricsBrowserService : MediaBrowserServiceCompat() {
 
     private val debugReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
+            // --es pref aa_show_cover_art --ez value false: flips a switch from the PC.
+            intent.getStringExtra("pref")?.let { key ->
+                getSharedPreferences("auto_lyrics_prefs", MODE_PRIVATE).edit()
+                    .putBoolean(key, intent.getBooleanExtra("value", false)).apply()
+                Log.d(TAG, "debug pref $key set")
+                return
+            }
             if (intent.getBooleanExtra("clear", false)) {
                 debugOverride = false
                 lastSubtitleText = null

@@ -7,6 +7,10 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
 import android.os.IBinder
 import android.os.SystemClock
 import android.support.v4.media.MediaMetadataCompat
@@ -85,11 +89,26 @@ class PlayerService : Service() {
                 .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, song.artist)
                 .putString(MediaMetadataCompat.METADATA_KEY_ALBUM, song.album)
                 .putLong(MediaMetadataCompat.METADATA_KEY_DURATION, song.durationMs)
+                .putBitmap(MediaMetadataCompat.METADATA_KEY_ALBUM_ART, cover(songIndex))
                 .build()
         )
         positionMs = 0L
         positionAt = SystemClock.elapsedRealtime()
         if (autoplay) play() else publish()
+    }
+
+    /** A plain cover per song, so album art shows up like with a real player. */
+    private fun cover(index: Int): Bitmap {
+        val bmp = Bitmap.createBitmap(512, 512, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bmp)
+        canvas.drawColor(Color.HSVToColor(floatArrayOf(index * 60f, 0.6f, 0.75f)))
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.WHITE
+            textSize = 64f
+            textAlign = Paint.Align.CENTER
+        }
+        canvas.drawText(SONGS[index].album.take(14), 256f, 280f, paint)
+        return bmp
     }
 
     private fun play() {
