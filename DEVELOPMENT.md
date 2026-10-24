@@ -171,6 +171,17 @@ adb shell am start-foreground-service -n com.autolyrics.testplayer/.PlayerServic
 **Debugging**: open the project in Android Studio and use *Attach Debugger to Android Process* →
 `com.autolyrics`, or watch `adb logcat -s AutoLyricsAA Musixmatch`.
 
+### 16 KB page size
+
+Android 15+ devices may use 16 KB memory pages. The ML Kit native libraries are 16 KB-aligned ELF
+files, and AGP 8.5.1+ stores them 16 KB-aligned in the APK. Check a build with build-tools 35+:
+
+```powershell
+zipalign -c -P 16 -v 4 app\build\outputs\apk\debug\app-debug.apk
+```
+
+To run it on 16 KB pages, use the `system-images;android-35;google_apis_ps16k;x86_64` emulator image.
+
 ### Probing the car screen
 
 Debug builds accept a broadcast that replaces the media metadata until cleared, to see how
