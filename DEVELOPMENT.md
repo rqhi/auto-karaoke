@@ -14,6 +14,7 @@
 | **Plain lyrics** / **Unsynced** | No timestamps. `LyricsStatus.PLAIN_ONLY`. Scrolled proportionally based on song duration. |
 | **SyncLRC** | Primary lyrics API: `synclrc.tharuk.pro`. Provides karaoke, synced, and plain lyrics. |
 | **LRCLIB** | Fallback lyrics API: `lrclib.net`. Provides synced and plain lyrics. |
+| **Musixmatch** | Unofficial anonymous mobile API (`apic-appmobile.musixmatch.com`). Provides RichSync (word timing) and line-synced lyrics. |
 | **AA offset** | A separate lyrics delay setting specific to Android Auto, stored as `aa_offset_ms` in SharedPreferences. |
 | **Phone sync** | The global lyrics offset applied on the phone, managed by `MediaTracker.offsetMs`. |
 
@@ -56,6 +57,7 @@ AutoLyricsApp (Application)
 | `media/MediaListenerService.kt` | `NotificationListenerService` — detects media sessions. |
 | `lyrics/SyncLrcClient.kt` | HTTP client for SyncLRC API (primary source). |
 | `lyrics/LrcLibClient.kt` | HTTP client for LRCLIB API (fallback source). |
+| `lyrics/MusixmatchClient.kt` | Musixmatch mobile API: token, macro.subtitles.get, RichSync. Ported from the whoxamxl/auto-lyrics fork. |
 | `lyrics/LrcParser.kt` | Parses LRC and ELRC format strings into `LyricLine` lists. |
 | `lyrics/MetadataCleaner.kt` | Normalizes track/artist strings for API queries. |
 | `lyrics/LyricsCache.kt` | In-memory lyrics cache with background refresh and queue pre-fetching. |
@@ -106,6 +108,9 @@ AutoLyricsApp (Application)
 | `lyrics_font_family` | String | `sans-serif` | Phone lyrics font family. |
 | `aa_karaoke_enabled` | Boolean | true | Toggle karaoke bracket display on AA. |
 | `aa_offset_ms` | Long | 0 | Android Auto-specific lyrics delay (ms). |
+| `aa_hide_controls` | Boolean | false | Hide play/pause/skip and the progress bar on the car's player and media card. |
+| `aa_show_cover_art` | Boolean | true | Send the song's cover to the car; when off, a transparent image is sent instead. |
+| `musixmatch_enabled` | Boolean | true | Include Musixmatch in the lookup. |
 
 ## Karaoke Bracket Logic (AA)
 
@@ -117,6 +122,94 @@ The bracket display uses **monotonic advancement** to avoid visual jitter:
 
 ## Lyrics Fetch Priority
 
-1. **SyncLRC** (`synclrc.tharuk.pro`) — returns karaoke (ELRC), synced (LRC), or plain text.
-2. **LRCLIB** (`lrclib.net`) — fallback, returns synced (LRC) or plain text.
-3. Within a response, preference: karaoke > synced > plain.
+1. A match the user picked with "Wrong lyrics?" (LRCLIB id).
+2. **SyncLRC** karaoke (ELRC word timing).
+3. **Musixmatch** RichSync or line-synced lyrics (if `musixmatch_enabled`).
+4. **SyncLRC** synced/plain, then **LRCLIB** synced/plain.
+
+## Android Auto screens
+
+What Android Auto shows from the MediaSession, as tested on the Desktop Head Unit:
+
+- The full-screen player and the small media card show only `DISPLAY_TITLE` and `DISPLAY_SUBTITLE`,
+  one line each; line breaks are cut off. Album, description and queue title are not shown.
+- `ALBUM_ART` is the source player's cover. Without it the player draws an empty placeholder
+  square; the small media card uses it as a dimmed, center-cropped background.
+- Play/pause/skip disappear when the playback state offers no transport actions; the progress
+  bar disappears without `METADATA_KEY_DURATION` and with an unknown position.
+- The default media button handling ignores keys whose action is missing from the playback state,
+  so `onMediaButtonEvent` handles steering wheel and headset keys itself.
+- On a landscape car screen the full-screen player puts the two lines and the controls on the
+  left and the album art on the right. Android Auto always left-aligns those lines; leading
+  no-break spaces would shift them, but the same lines also feed the narrow media card, where
+  they would push the text out of view, so the text is not centered when the cover is hidden.
+- The round icon at the top left of the player (and in the launcher) is the app icon. Android
+  Auto draws it on a white circle, so a transparent icon only leaves an empty white circle.
+
+## Testing Android Auto on the PC
+
+One-time setup (JDK 17, SDK, adb, Desktop Head Unit):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\tools\install-sdk.ps1
+```
+
+**With a phone over USB**
+
+1. Phone: enable *USB debugging*; in Android Auto settings tap *Version* 10× → ⋮ → *Developer settings* → *Unknown sources*.
+   Then ⋮ → *Start head unit server* (German: „Server für Haupteinheit starten“).
+2. `.\tools\run.ps1 -Serial <serial>` builds, installs, restarts the app and tails its logs.
+3. `.\tools\start-dhu.ps1 -Serial <serial>` opens the car screen (`-Config enyaq|widescreen|portrait|default`).
+
+`-Config enyaq` matches a Skoda Enyaq (13" screen, MY2027): launcher bar at the bottom, Maps
+with a narrow media card next to it, and opened apps filling the screen. The layout follows the
+reported dpi; at 160-200 dpi Android Auto uses a left rail instead, as in the `720p` config.
+
+**Without a phone**: `.\tools\start-emulator.ps1` boots an emulator with Google Play (`-Avd <name>`).
+Play no longer offers Android Auto on emulators, so copy it from a connected phone that has it:
+`.\tools\copy-aa-to-emulator.ps1 -Phone <serial> -Emulator emulator-5554`. Then use the same steps
+with the emulator's serial.
+
+**Test Player** (`testplayer/`): a silent fake music app, so no music subscription or sign-in is needed.
+
+```powershell
+adb shell am start-foreground-service -n com.autolyrics.testplayer/.PlayerService -a play --ei song 0
+adb shell am start-foreground-service -n com.autolyrics.testplayer/.PlayerService -a seek --el pos 60000
+```
+
+**Head unit console**: the DHU window's terminal accepts commands such as `screenshot out.png`,
+`tap 640 360`, `keycode media_next` / `keycode media_play_pause` (steering wheel buttons),
+`day` / `night` and `help`.
+
+**Debugging**: open the project in Android Studio and use *Attach Debugger to Android Process* →
+`com.autolyrics`, or watch `adb logcat -s AutoLyricsAA Musixmatch`.
+
+### 16 KB page size
+
+Android 15+ devices may use 16 KB memory pages. The ML Kit native libraries are 16 KB-aligned ELF
+files, and AGP 8.5.1+ stores them 16 KB-aligned in the APK. Check a build with build-tools 35+:
+
+```powershell
+zipalign -c -P 16 -v 4 app\build\outputs\apk\debug\app-debug.apk
+```
+
+To run it on 16 KB pages, use the `system-images;android-35;google_apis_ps16k;x86_64` emulator image.
+
+### Probing the car screen
+
+Debug builds accept a broadcast that replaces the media metadata until cleared, to see how
+Android Auto lays out a field without changing code:
+
+```powershell
+adb shell "am broadcast -a com.autolyrics.DEBUG_METADATA --es display_title 'Big line' --es display_subtitle 'Small line' --el duration 200000"
+adb shell am broadcast -a com.autolyrics.DEBUG_METADATA --ez clear true
+```
+
+Debug builds also flip boolean settings, such as the cover and controls switches:
+
+```powershell
+adb shell am broadcast -a com.autolyrics.DEBUG_METADATA --es pref aa_show_cover_art --ez value false
+```
+
+Other extras: `title`, `artist`, `album`, `display_description`, `queue_title`, `art` (real album art),
+`actions` (playback actions bitmask).

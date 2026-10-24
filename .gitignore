@@ -9,6 +9,7 @@
 .cxx
 local.properties
 /app/build
+/testplayer/build
 /app/release
 *.apk
 *.aab

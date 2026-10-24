@@ -15,6 +15,7 @@ import com.autolyrics.lyrics.LrcParser
 import com.autolyrics.lyrics.LyricsCache
 import com.autolyrics.lyrics.LyricsTranslator
 import com.autolyrics.lyrics.MetadataCleaner
+import com.autolyrics.lyrics.MusixmatchClient
 import com.autolyrics.lyrics.Romanizer
 import com.autolyrics.lyrics.SyncLrcClient
 import com.autolyrics.model.LyricLine
@@ -287,7 +288,7 @@ class MediaTracker private constructor(context: Context) {
                     }
                 }
 
-                val result = fetchPicked(track) ?: fetchFromSyncLrc(track) ?: fetchFromLrcLib(track)
+                val result = fetchPicked(track) ?: fetchAutomatic(track)
 
                 withContext(Dispatchers.Main) {
                     if (_state.value.track != track) return@withContext
@@ -346,7 +347,7 @@ class MediaTracker private constructor(context: Context) {
                     if (lyricsCache.get(title, artist) != null) return@launch
 
                     val nextTrack = TrackInfo(title, artist, "", 0)
-                    val result = fetchPicked(nextTrack) ?: fetchFromSyncLrc(nextTrack) ?: fetchFromLrcLib(nextTrack)
+                    val result = fetchPicked(nextTrack) ?: fetchAutomatic(nextTrack)
                     if (result != null) {
                         lyricsCache.put(title, artist, result.lines, result.status, result.source)
                     }
@@ -363,6 +364,33 @@ class MediaTracker private constructor(context: Context) {
         val status: LyricsStatus,
         val source: String
     )
+
+    /**
+     * Word-timed lyrics win over line-timed ones: SyncLRC karaoke, then Musixmatch
+     * (RichSync or line sync), then SyncLRC's other results, then LRCLIB.
+     */
+    private fun fetchAutomatic(track: TrackInfo): FetchResult? {
+        val syncLrc = fetchFromSyncLrc(track)
+        if (syncLrc != null && syncLrc.lines.any { it.words.isNotEmpty() }) return syncLrc
+        val musixmatch = if (prefs.getBoolean("musixmatch_enabled", true)) fetchFromMusixmatch(track) else null
+        if (musixmatch != null && (musixmatch.status == LyricsStatus.FOUND || syncLrc == null)) return musixmatch
+        return syncLrc ?: fetchFromLrcLib(track)
+    }
+
+    private fun fetchFromMusixmatch(track: TrackInfo): FetchResult? {
+        val result = try {
+            MusixmatchClient.getLyrics(track, prefs)
+        } catch (_: Exception) {
+            null
+        } ?: return null
+        val hasRealText = result.lines.any { it.text != "♪" && it.text.isNotBlank() }
+        if (!hasRealText) return null
+        return FetchResult(
+            result.lines,
+            LyricsStatus.FOUND,
+            if (result.isRichSync) "Musixmatch · Karaoke" else "Musixmatch · Synced"
+        )
+    }
 
     private fun fetchFromSyncLrc(track: TrackInfo): FetchResult? {
         val result = try {

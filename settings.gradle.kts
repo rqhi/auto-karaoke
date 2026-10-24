@@ -16,3 +16,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "AutoLyrics"
 include(":app")
+include(":testplayer")

@@ -1,12 +1,19 @@
 package com.autolyrics.auto
 
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.content.SharedPreferences
+import android.content.pm.ApplicationInfo
 import android.graphics.Bitmap
 import android.media.session.MediaController
 import android.media.session.PlaybackState
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.view.KeyEvent
+import android.util.Log
 import android.support.v4.media.MediaBrowserCompat
 import android.support.v4.media.MediaDescriptionCompat
 import android.support.v4.media.MediaMetadataCompat
@@ -42,6 +49,8 @@ class LyricsBrowserService : MediaBrowserServiceCompat() {
 
     private var aaKaraokeEnabled = true
     private var aaOffsetMs = 0L
+    private var aaHideControls = false
+    private var aaShowCoverArt = true
 
     private var lastKaraokeLineIdx = -1
     private var lastKaraokeWordIdx = -1
@@ -58,10 +67,20 @@ class LyricsBrowserService : MediaBrowserServiceCompat() {
                     aaOffsetMs = sp.getLong(key, 0L)
                     forceRefresh()
                 }
+                "aa_hide_controls", "aa_show_cover_art" -> {
+                    aaHideControls = sp.getBoolean("aa_hide_controls", false)
+                    aaShowCoverArt = sp.getBoolean("aa_show_cover_art", true)
+                    val state = mediaTracker.state.value
+                    mediaSession.setMetadata(buildMetadata(state, getCardText(state)))
+                    mediaSession.setPlaybackState(buildPlaybackState(state))
+                }
             }
         }
 
     companion object {
+        private const val TAG = "AutoLyricsAA"
+        /** Debug builds only: see DEVELOPMENT.md, "Probing the car screen". */
+        private const val DEBUG_METADATA_ACTION = "com.autolyrics.DEBUG_METADATA"
         private const val ROOT_ID = "root"
         private const val SYNC_MENU_ID = "sync_menu"
         private const val SYNC_MINUS_ID = "sync_minus"
@@ -93,6 +112,8 @@ class LyricsBrowserService : MediaBrowserServiceCompat() {
         val prefs = getSharedPreferences("auto_lyrics_prefs", MODE_PRIVATE)
         aaKaraokeEnabled = prefs.getBoolean("aa_karaoke_enabled", true)
         aaOffsetMs = prefs.getLong("aa_offset_ms", 0L)
+        aaHideControls = prefs.getBoolean("aa_hide_controls", false)
+        aaShowCoverArt = prefs.getBoolean("aa_show_cover_art", true)
         prefs.registerOnSharedPreferenceChangeListener(prefsListener)
 
         mediaSession = MediaSessionCompat(this, "AutoLyrics").apply {
@@ -100,6 +121,15 @@ class LyricsBrowserService : MediaBrowserServiceCompat() {
             isActive = true
         }
         sessionToken = mediaSession.sessionToken
+
+        if (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0) {
+            val filter = IntentFilter(DEBUG_METADATA_ACTION)
+            if (android.os.Build.VERSION.SDK_INT >= 33) {
+                registerReceiver(debugReceiver, filter, RECEIVER_EXPORTED)
+            } else {
+                registerReceiver(debugReceiver, filter)
+            }
+        }
 
         scope.launch {
             mediaTracker.state.collectLatest { state ->
@@ -129,7 +159,7 @@ class LyricsBrowserService : MediaBrowserServiceCompat() {
             while (isActive) {
                 delay(SESSION_REFRESH_MS)
                 val state = mediaTracker.state.value
-                if (state.isPlaying && state.track != null) {
+                if (state.isPlaying && state.track != null && !debugOverride) {
                     mediaSession.isActive = true
                     mediaSession.setPlaybackState(buildPlaybackState(state))
                 }
@@ -138,6 +168,9 @@ class LyricsBrowserService : MediaBrowserServiceCompat() {
     }
 
     override fun onDestroy() {
+        if (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0) {
+            unregisterReceiver(debugReceiver)
+        }
         getSharedPreferences("auto_lyrics_prefs", MODE_PRIVATE)
             .unregisterOnSharedPreferenceChangeListener(prefsListener)
         scope.cancel()
@@ -505,7 +538,10 @@ class LyricsBrowserService : MediaBrowserServiceCompat() {
         if (state.status == LyricsStatus.FOUND && lines.isNotEmpty()) {
             val countdown = Countdown.compute(lines, posMs)
             if (countdown.dots > 0) {
-                return CardText(countdownDots(countdown.dots), firstChunk(singText(state, countdown.nextIndex)))
+                return CardText(
+                    countdownDots(countdown.dots),
+                    firstChunk(singText(state, countdown.nextIndex))
+                )
             }
             val idx = findLineIndex(lines, posMs)
             if (idx < 0) {
@@ -623,37 +659,102 @@ class LyricsBrowserService : MediaBrowserServiceCompat() {
         return if (out.isEmpty()) listOf(clean) else out
     }
 
+    // --- Debug: push raw metadata to the car screen with adb ---
+
+    /** While set, the lyrics updates leave the media card alone. */
+    private var debugOverride = false
+
+    private val debugReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            // --es pref aa_show_cover_art --ez value false: flips a switch from the PC.
+            intent.getStringExtra("pref")?.let { key ->
+                getSharedPreferences("auto_lyrics_prefs", MODE_PRIVATE).edit()
+                    .putBoolean(key, intent.getBooleanExtra("value", false)).apply()
+                Log.d(TAG, "debug pref $key set")
+                return
+            }
+            if (intent.getBooleanExtra("clear", false)) {
+                debugOverride = false
+                lastSubtitleText = null
+                updateMediaSession(mediaTracker.state.value)
+                Log.d(TAG, "debug metadata cleared")
+                return
+            }
+            debugOverride = true
+            val b = MediaMetadataCompat.Builder()
+            val keys = mapOf(
+                "title" to MediaMetadataCompat.METADATA_KEY_TITLE,
+                "artist" to MediaMetadataCompat.METADATA_KEY_ARTIST,
+                "album" to MediaMetadataCompat.METADATA_KEY_ALBUM,
+                "album_artist" to MediaMetadataCompat.METADATA_KEY_ALBUM_ARTIST,
+                "display_title" to MediaMetadataCompat.METADATA_KEY_DISPLAY_TITLE,
+                "display_subtitle" to MediaMetadataCompat.METADATA_KEY_DISPLAY_SUBTITLE,
+                "display_description" to MediaMetadataCompat.METADATA_KEY_DISPLAY_DESCRIPTION,
+                "writer" to MediaMetadataCompat.METADATA_KEY_WRITER,
+                "composer" to MediaMetadataCompat.METADATA_KEY_COMPOSER
+            )
+            for ((extra, key) in keys) {
+                // A literal "\n" in the adb string becomes a real line break.
+                intent.getStringExtra(extra)?.let { b.putString(key, it.replace("\\n", "\n")) }
+            }
+            if (intent.getBooleanExtra("art", false)) {
+                (mediaTracker.state.value.albumArt ?: lastAlbumArt)?.let {
+                    b.putBitmap(MediaMetadataCompat.METADATA_KEY_ALBUM_ART, it)
+                }
+            }
+            if (intent.hasExtra("duration")) {
+                b.putLong(MediaMetadataCompat.METADATA_KEY_DURATION, intent.getLongExtra("duration", 0L))
+            }
+            mediaSession.setMetadata(b.build())
+            intent.getStringExtra("queue_title")?.let { mediaSession.setQueueTitle(it) }
+            if (intent.hasExtra("actions")) {
+                mediaSession.setPlaybackState(
+                    PlaybackStateCompat.Builder()
+                        .setState(PlaybackStateCompat.STATE_PLAYING, 0L, 1f)
+                        .setActions(intent.getLongExtra("actions", 0L))
+                        .build()
+                )
+            }
+            Log.d(TAG, "debug metadata set: ${intent.extras?.keySet()}")
+        }
+    }
+
     // --- MediaSession management ---
 
-    private fun buildBaseMetadata(state: LyricsState): MediaMetadataCompat.Builder {
+    /**
+     * Metadata for the car's player and media card.
+     */
+    private fun buildMetadata(state: LyricsState, card: CardText): MediaMetadataCompat {
         val metaBuilder = MediaMetadataCompat.Builder()
 
         state.track?.let { track ->
             metaBuilder.putString(MediaMetadataCompat.METADATA_KEY_TITLE, track.title)
             metaBuilder.putString(MediaMetadataCompat.METADATA_KEY_ARTIST, track.artist)
             metaBuilder.putString(MediaMetadataCompat.METADATA_KEY_ALBUM, track.album)
-            if (track.durationMs > 0) {
+            // Without a duration the car leaves out the progress bar.
+            if (track.durationMs > 0 && !aaHideControls) {
                 metaBuilder.putLong(MediaMetadataCompat.METADATA_KEY_DURATION, track.durationMs)
             }
         }
-
         val art = state.albumArt ?: lastAlbumArt
-        if (art != null) {
-            metaBuilder.putBitmap(MediaMetadataCompat.METADATA_KEY_ALBUM_ART, art)
-            lastAlbumArt = art
+        if (art != null) lastAlbumArt = art
+        // With no art at all the car draws a placeholder square, so a hidden cover is
+        // sent as a transparent image instead.
+        val shownArt = if (aaShowCoverArt) art else blankArt
+        if (shownArt != null) {
+            metaBuilder.putBitmap(MediaMetadataCompat.METADATA_KEY_ALBUM_ART, shownArt)
         }
 
-        return metaBuilder
-    }
-
-    private fun putCard(metaBuilder: MediaMetadataCompat.Builder, card: CardText) {
         if (card.title.isNotBlank()) {
             metaBuilder.putString(MediaMetadataCompat.METADATA_KEY_DISPLAY_TITLE, card.title)
         }
         if (card.subtitle.isNotBlank()) {
             metaBuilder.putString(MediaMetadataCompat.METADATA_KEY_DISPLAY_SUBTITLE, card.subtitle)
         }
+        return metaBuilder.build()
     }
+
+    private val blankArt: Bitmap by lazy { Bitmap.createBitmap(8, 8, Bitmap.Config.ARGB_8888) }
 
     private fun updateMediaSession(state: LyricsState) {
         val trackChanged = state.track?.title != displayedTrackTitle
@@ -663,19 +764,18 @@ class LyricsBrowserService : MediaBrowserServiceCompat() {
             lastAlbumArt = null
             resetKaraokeState()
         }
+        if (debugOverride) return
 
-        val metaBuilder = buildBaseMetadata(state)
         val card = getCardText(state)
-        putCard(metaBuilder, card)
         lastSubtitleText = "${card.title}\n${card.subtitle}"
 
-        mediaSession.setMetadata(metaBuilder.build())
+        mediaSession.setMetadata(buildMetadata(state, card))
         mediaSession.setPlaybackState(buildPlaybackState(state))
     }
 
     private fun updateSubtitleKaraoke() {
         val state = mediaTracker.state.value
-        if (!state.isPlaying) return
+        if (!state.isPlaying || debugOverride) return
         if (state.status != LyricsStatus.FOUND && state.status != LyricsStatus.PLAIN_ONLY) return
 
         val card = getCardText(state)
@@ -683,9 +783,7 @@ class LyricsBrowserService : MediaBrowserServiceCompat() {
         if (key == lastSubtitleText) return
         lastSubtitleText = key
 
-        val metaBuilder = buildBaseMetadata(state)
-        putCard(metaBuilder, card)
-        mediaSession.setMetadata(metaBuilder.build())
+        mediaSession.setMetadata(buildMetadata(state, card))
         mediaSession.setPlaybackState(buildPlaybackState(state))
     }
 
@@ -698,22 +796,32 @@ class LyricsBrowserService : MediaBrowserServiceCompat() {
             PlaybackStateCompat.STATE_NONE
         }
 
-        val position = try {
+        // An unknown position also takes the progress bar off the screen.
+        val position = if (aaHideControls) {
+            PlaybackStateCompat.PLAYBACK_POSITION_UNKNOWN
+        } else try {
             mediaTracker.getCurrentPositionMs()
         } catch (_: Exception) {
             0L
         }
 
-        return PlaybackStateCompat.Builder()
-            .setState(pbState, position, if (state.isPlaying) 1.0f else 0f)
-            .setActions(
-                PlaybackStateCompat.ACTION_PLAY or
+        // Taps on lyric lines and the sync menu need PLAY_FROM_MEDIA_ID; the rest is
+        // the transport bar, which "Hide playback controls" leaves out.
+        val actions = if (aaHideControls) {
+            PlaybackStateCompat.ACTION_PLAY_FROM_MEDIA_ID
+        } else {
+            PlaybackStateCompat.ACTION_PLAY or
                 PlaybackStateCompat.ACTION_PAUSE or
                 PlaybackStateCompat.ACTION_SKIP_TO_NEXT or
                 PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS or
                 PlaybackStateCompat.ACTION_PLAY_PAUSE or
-                PlaybackStateCompat.ACTION_SEEK_TO
-            )
+                PlaybackStateCompat.ACTION_SEEK_TO or
+                PlaybackStateCompat.ACTION_PLAY_FROM_MEDIA_ID
+        }
+
+        return PlaybackStateCompat.Builder()
+            .setState(pbState, position, if (state.isPlaying) 1.0f else 0f)
+            .setActions(actions)
             .build()
     }
 
@@ -832,6 +940,29 @@ class LyricsBrowserService : MediaBrowserServiceCompat() {
     }
 
     private inner class SessionCallback : MediaSessionCompat.Callback() {
+        /**
+         * Steering wheel and headset buttons. The default handling drops a key when the
+         * playback state leaves out its action, which "Hide playback controls" does.
+         */
+        override fun onMediaButtonEvent(mediaButtonEvent: Intent?): Boolean {
+            @Suppress("DEPRECATION")
+            val event = mediaButtonEvent?.getParcelableExtra<KeyEvent>(Intent.EXTRA_KEY_EVENT)
+                ?: return super.onMediaButtonEvent(mediaButtonEvent)
+            if (event.action != KeyEvent.ACTION_DOWN) return true
+            when (event.keyCode) {
+                KeyEvent.KEYCODE_MEDIA_PLAY -> onPlay()
+                KeyEvent.KEYCODE_MEDIA_PAUSE -> onPause()
+                KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE, KeyEvent.KEYCODE_HEADSETHOOK ->
+                    if (mediaTracker.state.value.isPlaying) onPause() else onPlay()
+                KeyEvent.KEYCODE_MEDIA_NEXT -> onSkipToNext()
+                KeyEvent.KEYCODE_MEDIA_PREVIOUS -> onSkipToPrevious()
+                KeyEvent.KEYCODE_MEDIA_STOP -> onStop()
+                else -> return super.onMediaButtonEvent(mediaButtonEvent)
+            }
+            Log.d(TAG, "media button ${KeyEvent.keyCodeToString(event.keyCode)}")
+            return true
+        }
+
         override fun onPlay() {
             getActiveMediaController()?.transportControls?.play()
         }

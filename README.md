@@ -1,6 +1,6 @@
 # Auto Lyrics
 
-An Android Auto app that displays synced lyrics for the currently playing song, powered by [LRCLIB](https://lrclib.net/).
+An Android Auto app that displays synced lyrics for the currently playing song, powered by [LRCLIB](https://lrclib.net/), SyncLRC and Musixmatch.
 
 ## Features
 
@@ -53,16 +53,7 @@ LyricsScreen      MainActivity
 
 ### Testing with Android Auto Desktop Head Unit (DHU)
 
-1. Install **Android Auto Desktop Head Unit emulator** from SDK Manager → SDK Tools
-2. Enable **Developer mode** in the Android Auto app on your phone (tap version 10 times)
-3. In Android Auto developer settings, enable **Unknown sources**
-4. Start the DHU:
-   ```
-   cd $ANDROID_SDK/extras/google/auto/
-   ./desktop-head-unit
-   ```
-5. Connect your phone via USB with the Android Auto companion app running
-6. Auto Lyrics will appear in the app launcher on the DHU
+See **Testing Android Auto on the PC** in [DEVELOPMENT.md](DEVELOPMENT.md): scripts in `tools/` install the SDK and head unit, build and install the app, and start the head unit against a phone or emulator. A silent test player (`testplayer/`) stands in for a music app.
 
 ### Using on a real car (sideloaded APK)
 
