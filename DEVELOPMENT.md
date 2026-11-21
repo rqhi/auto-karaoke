@@ -15,6 +15,7 @@
 | **SyncLRC** | Primary lyrics API: `synclrc.tharuk.pro`. Provides karaoke, synced, and plain lyrics. |
 | **LRCLIB** | Fallback lyrics API: `lrclib.net`. Provides synced and plain lyrics. |
 | **Musixmatch** | Unofficial anonymous mobile API (`apic-appmobile.musixmatch.com`). Provides RichSync (word timing) and line-synced lyrics. |
+| **Spotify source** | Track and position from the Spotify Web API instead of the phone's media session, for when the car's own Spotify app plays. |
 | **AA offset** | A separate lyrics delay setting specific to Android Auto, stored as `aa_offset_ms` in SharedPreferences. |
 | **Phone sync** | The global lyrics offset applied on the phone, managed by `MediaTracker.offsetMs`. |
 
@@ -58,6 +59,9 @@ AutoLyricsApp (Application)
 | `lyrics/SyncLrcClient.kt` | HTTP client for SyncLRC API (primary source). |
 | `lyrics/LrcLibClient.kt` | HTTP client for LRCLIB API (fallback source). |
 | `lyrics/MusixmatchClient.kt` | Musixmatch mobile API: token, macro.subtitles.get, RichSync. Ported from the whoxamxl/auto-lyrics fork. |
+| `spotify/SpotifyClient.kt` | Spotify Web API: PKCE tokens, currently playing track and position, player controls. |
+| `spotify/SpotifyLogin.kt` | Browser sign-in; a one-off server on `127.0.0.1:43821` receives the redirect. |
+| `media/PlaybackControls.kt` | Play/pause/skip/seek for the current source (phone app or Spotify API). |
 | `lyrics/LrcParser.kt` | Parses LRC and ELRC format strings into `LyricLine` lists. |
 | `lyrics/MetadataCleaner.kt` | Normalizes track/artist strings for API queries. |
 | `lyrics/LyricsCache.kt` | In-memory lyrics cache with background refresh and queue pre-fetching. |
@@ -111,6 +115,9 @@ AutoLyricsApp (Application)
 | `aa_hide_controls` | Boolean | false | Hide play/pause/skip and the progress bar on the car's player and media card. |
 | `aa_show_cover_art` | Boolean | true | Send the song's cover to the car; when off, a transparent image is sent instead. |
 | `musixmatch_enabled` | Boolean | true | Include Musixmatch in the lookup. |
+| `spotify_sync_enabled` | Boolean | false | Follow the Spotify Web API (see "Spotify source"). |
+| `spotify_client_id` | String | | Client ID of the user's own Spotify developer app. |
+| `spotify_access_token`, `spotify_refresh_token`, `spotify_token_expires_at_ms` | | | Spotify tokens, cleared on Disconnect. |
 
 ## Karaoke Bracket Logic (AA)
 
@@ -126,6 +133,27 @@ The bracket display uses **monotonic advancement** to avoid visual jitter:
 2. **SyncLRC** karaoke (ELRC word timing).
 3. **Musixmatch** RichSync or line-synced lyrics (if `musixmatch_enabled`).
 4. **SyncLRC** synced/plain, then **LRCLIB** synced/plain.
+
+## Spotify source
+
+When the car plays Spotify through its own app, the phone's media session shows nothing (or
+something else). With *Sync from Spotify* on, `MediaTracker` polls
+`GET /v1/me/player/currently-playing` (every 3 s while playing, right after a song should end,
+5 s paused, 15 s off) and follows it:
+
+- A playing track there wins over the phone, unless the phone's own Spotify app is the one
+  playing; its media session has the exact position. When Spotify plays nothing, the phone's
+  player takes over again.
+- The position is `progress_ms` at the middle of the request, re-synced only when it drifts more
+  than 350 ms. The cover comes from the track's album images.
+- Car controls, steering wheel buttons and tapped lyric lines go to the Web API player
+  endpoints, which need Spotify Premium.
+
+Setup: create an app on developer.spotify.com with the Web API and the redirect URI
+`http://127.0.0.1:43821/callback` (Spotify only allows HTTP on loopback IPs), paste its client
+ID in the settings and tap *Connect*. Development-mode apps need the app owner to have Premium
+and allow up to 5 users, each added under *User Management*. Sign-in uses PKCE, so there is no
+client secret in the app.
 
 ## Android Auto screens
 

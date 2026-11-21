@@ -42,6 +42,8 @@ import com.autolyrics.model.AlbumColors
 import com.autolyrics.model.LyricsCandidate
 import com.autolyrics.model.LyricsState
 import com.autolyrics.model.LyricsStatus
+import com.autolyrics.spotify.SpotifyClient
+import com.autolyrics.spotify.SpotifyLogin
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import kotlinx.coroutines.launch
 
@@ -212,6 +214,8 @@ class MainActivity : AppCompatActivity() {
                 prefs.edit().putBoolean("musixmatch_enabled", isChecked).apply()
             }
         }
+
+        setupSpotify()
 
         findViewById<SwitchCompat>(R.id.switch_aa_hide_controls).apply {
             isChecked = prefs.getBoolean("aa_hide_controls", false)
@@ -722,6 +726,52 @@ class MainActivity : AppCompatActivity() {
     }
 
     @SuppressLint("ClickableViewAccessibility")
+    private fun setupSpotify() {
+        val switch = findViewById<SwitchCompat>(R.id.switch_spotify)
+        val clientIdField = findViewById<EditText>(R.id.edit_spotify_client_id)
+        val status = findViewById<TextView>(R.id.tv_spotify_status)
+        val button = findViewById<Button>(R.id.btn_spotify_connect)
+
+        fun refresh(message: String? = null) {
+            val connected = SpotifyClient.isConnected(prefs)
+            button.text = if (connected) "Disconnect" else "Connect"
+            status.text = message ?: if (connected) "Connected" else "Not connected"
+        }
+
+        switch.isChecked = prefs.getBoolean(SpotifyClient.PREF_ENABLED, false)
+        switch.setOnCheckedChangeListener { _, isChecked ->
+            prefs.edit().putBoolean(SpotifyClient.PREF_ENABLED, isChecked).apply()
+        }
+        clientIdField.setText(prefs.getString(SpotifyClient.PREF_CLIENT_ID, ""))
+        refresh()
+
+        button.setOnClickListener {
+            if (SpotifyClient.isConnected(prefs)) {
+                SpotifyClient.disconnect(prefs)
+                refresh()
+                return@setOnClickListener
+            }
+            val clientId = clientIdField.text.toString().trim()
+            if (clientId.isEmpty()) {
+                refresh("Paste the client ID first.")
+                return@setOnClickListener
+            }
+            prefs.edit().putString(SpotifyClient.PREF_CLIENT_ID, clientId).apply()
+            button.isEnabled = false
+            refresh("Waiting for Spotify in the browser…")
+            lifecycleScope.launch {
+                val error = SpotifyLogin.login(this@MainActivity, prefs, clientId)
+                button.isEnabled = true
+                if (error == null) {
+                    switch.isChecked = true
+                    refresh()
+                } else {
+                    refresh(error)
+                }
+            }
+        }
+    }
+
     private fun setupScrollDetection() {
         scrollView.setOnTouchListener { _, event ->
             when (event.action) {

@@ -6,6 +6,7 @@ An Android Auto app that displays synced lyrics for the currently playing song, 
 
 - **Synced lyrics on Android Auto** — shows the current lyric line with surrounding context, updated in real-time
 - **Works with any music player** — Spotify, YouTube Music, Apple Music, Poweramp, etc.
+- **Spotify from the car** — optionally follows your Spotify account, so lyrics stay in sync when the car's own Spotify app plays (see DEVELOPMENT.md, "Spotify source")
 - **Phone companion view** — see lyrics on your phone screen too
 - **Automatic song detection** — picks up whatever is playing via media session APIs
 - **Multi-strategy lyrics lookup** — tries exact match first, falls back to keyword search
