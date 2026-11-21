@@ -23,8 +23,10 @@ import com.autolyrics.model.LyricsCandidate
 import com.autolyrics.model.LyricsState
 import com.autolyrics.model.LyricsStatus
 import com.autolyrics.model.TrackInfo
+import com.autolyrics.spotify.SpotifyClient
 import com.autolyrics.util.AlbumColorExtractor
 import kotlinx.coroutines.*
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -52,9 +54,27 @@ class MediaTracker private constructor(context: Context) {
     private var pendingArt: Bitmap? = null
     private var lyricsOffsetMs: Long = 0L
 
+    /**
+     * True while the lyrics follow Spotify's Web API instead of the phone's media
+     * session, e.g. when the car's own Spotify app plays. Phone callbacks are
+     * ignored meanwhile; see [pollSpotify].
+     */
+    @Volatile
+    var isSpotifySource = false
+        private set
+    private var spotifyCoverJob: Job? = null
+    private val spotifyWake = Channel<Unit>(Channel.CONFLATED)
+
+    // Kept in a field: SharedPreferences only holds listeners weakly.
+    private val prefsListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+        if (key?.startsWith("spotify_") == true) spotifyWake.trySend(Unit)
+    }
+
     init {
         lyricsOffsetMs = prefs.getLong("lyrics_offset_ms", 0L)
         _state.value = _state.value.copy(offsetMs = lyricsOffsetMs)
+        prefs.registerOnSharedPreferenceChangeListener(prefsListener)
+        scope.launch { pollSpotify() }
     }
 
     private val positionChecker = object : Runnable {
@@ -94,11 +114,11 @@ class MediaTracker private constructor(context: Context) {
 
     private val mediaCallback = object : MediaController.Callback() {
         override fun onMetadataChanged(metadata: MediaMetadata?) {
-            handleMetadataChanged(metadata)
+            if (!isSpotifySource) handleMetadataChanged(metadata)
         }
 
         override fun onPlaybackStateChanged(state: PlaybackState?) {
-            handlePlaybackStateChanged(state)
+            if (!isSpotifySource) handlePlaybackStateChanged(state)
         }
 
         override fun onSessionDestroyed() {
@@ -121,7 +141,31 @@ class MediaTracker private constructor(context: Context) {
     }
 
     fun resumePlayback() {
-        activeController?.transportControls?.play()
+        controls()?.play()
+    }
+
+    /** Controls for the player the lyrics follow right now. */
+    fun controls(): PlaybackControls? =
+        if (isSpotifySource) spotifyControls
+        else activeController?.transportControls?.let { PlaybackControls.of(it) }
+
+    /** Spotify's player API (Premium only); polls again shortly after so the change shows. */
+    private val spotifyControls = object : PlaybackControls {
+        override fun play() = spotifyCommand { SpotifyClient.play(prefs) }
+        override fun pause() = spotifyCommand { SpotifyClient.pause(prefs) }
+        override fun skipToNext() = spotifyCommand { SpotifyClient.next(prefs) }
+        override fun skipToPrevious() = spotifyCommand { SpotifyClient.previous(prefs) }
+        override fun stop() = pause()
+        override fun seekTo(positionMs: Long) = spotifyCommand { SpotifyClient.seek(prefs, positionMs) }
+    }
+
+    private fun spotifyCommand(command: () -> Boolean) {
+        scope.launch(Dispatchers.IO) {
+            if (command()) {
+                delay(SPOTIFY_COMMAND_SETTLE_MS)
+                spotifyWake.trySend(Unit)
+            }
+        }
     }
 
     fun setOffset(ms: Long) {
@@ -190,6 +234,8 @@ class MediaTracker private constructor(context: Context) {
     fun onMediaSessionChanged(controller: MediaController?) {
         activeController?.unregisterCallback(mediaCallback)
         activeController = controller
+        controller?.registerCallback(mediaCallback)
+        if (isSpotifySource) return
 
         if (controller == null) {
             handler.removeCallbacks(positionChecker)
@@ -199,7 +245,6 @@ class MediaTracker private constructor(context: Context) {
             return
         }
 
-        controller.registerCallback(mediaCallback)
         handleMetadataChanged(controller.metadata)
         handlePlaybackStateChanged(controller.playbackState)
     }
@@ -238,6 +283,108 @@ class MediaTracker private constructor(context: Context) {
         pendingArt = art
         handler.removeCallbacks(trackChangeRunnable)
         handler.postDelayed(trackChangeRunnable, 600)
+    }
+
+    // --- Spotify Web API as the source ---
+
+    /**
+     * While "Sync from Spotify" is on, asks Spotify what plays on the account. A
+     * playing track there wins over the phone's media session, so lyrics follow the
+     * car's own Spotify app too; the phone's Spotify app, when it is the one
+     * playing, stays the source because its position is exact. When Spotify plays
+     * nothing, the phone's player takes over again.
+     */
+    private suspend fun pollSpotify() {
+        while (true) {
+            val enabled = prefs.getBoolean(SpotifyClient.PREF_ENABLED, false) &&
+                SpotifyClient.isConnected(prefs)
+            var waitMs = SPOTIFY_IDLE_POLL_MS
+            if (enabled) {
+                val playback = withContext(Dispatchers.IO) { SpotifyClient.currentlyPlaying(prefs) }
+                val phone = activeController
+                val phonePlaying = phone?.playbackState?.state == PlaybackState.STATE_PLAYING
+                val phoneIsSpotify = phonePlaying && phone?.packageName == SPOTIFY_PACKAGE
+                if (playback != null && !phoneIsSpotify && (playback.isPlaying || !phonePlaying)) {
+                    followSpotify(playback)
+                } else if (isSpotifySource) {
+                    leaveSpotify()
+                }
+                waitMs = if (playback?.isPlaying == true) {
+                    // Look again right after the song should end, to catch the next one quickly.
+                    val left = playback.durationMs - playback.progressMs
+                    (left + SPOTIFY_END_GRACE_MS).coerceIn(SPOTIFY_MIN_POLL_MS, SPOTIFY_POLL_MS)
+                } else {
+                    SPOTIFY_PAUSED_POLL_MS
+                }
+            } else if (isSpotifySource) {
+                leaveSpotify()
+            }
+            withTimeoutOrNull(waitMs) { spotifyWake.receive() }
+        }
+    }
+
+    private fun followSpotify(playback: SpotifyClient.Playback) {
+        val switching = !isSpotifySource
+        if (switching) {
+            isSpotifySource = true
+            handler.removeCallbacks(trackChangeRunnable)
+        }
+
+        val track = TrackInfo(
+            MetadataCleaner.cleanTitle(playback.title),
+            MetadataCleaner.cleanArtist(playback.artist),
+            MetadataCleaner.cleanAlbum(playback.album),
+            playback.durationMs
+        )
+        val current = _state.value.track
+        val newTrack = current == null || track.title != current.title || track.artist != current.artist
+        if (newTrack) {
+            pendingTrack = track
+            pendingArt = null
+            trackChangeRunnable.run()
+        }
+        if (newTrack || _state.value.albumArt == null) loadSpotifyCover(track, playback.imageUrl)
+
+        // Only jump when the clock has drifted, so lines don't stutter on every poll.
+        val now = SystemClock.elapsedRealtime()
+        val position = playback.progressMs + if (playback.isPlaying) now - playback.atElapsedMs else 0L
+        val drift = kotlin.math.abs(getCurrentPositionMs() - lyricsOffsetMs - position)
+        if (switching || newTrack || playback.isPlaying != _state.value.isPlaying ||
+            drift > SPOTIFY_MAX_DRIFT_MS
+        ) {
+            lastPositionMs = position
+            lastPositionUpdateTime = now
+            playbackSpeed = 1.0f
+            _state.value = _state.value.copy(isPlaying = playback.isPlaying)
+            handler.removeCallbacks(positionChecker)
+            if (playback.isPlaying) handler.post(positionChecker) else updateCurrentPosition()
+        }
+    }
+
+    private fun loadSpotifyCover(track: TrackInfo, url: String?) {
+        spotifyCoverJob?.cancel()
+        if (url == null) return
+        spotifyCoverJob = scope.launch {
+            val art = withContext(Dispatchers.IO) { SpotifyClient.loadImage(url) } ?: return@launch
+            if (_state.value.track != track) return@launch
+            _state.value = _state.value.copy(albumArt = art)
+            extractAlbumColors(art)
+        }
+    }
+
+    private fun leaveSpotify() {
+        isSpotifySource = false
+        spotifyCoverJob?.cancel()
+        val controller = activeController
+        if (controller != null) {
+            handleMetadataChanged(controller.metadata)
+            handlePlaybackStateChanged(controller.playbackState)
+        } else {
+            // Nothing on the phone: keep the last song on screen, paused.
+            handler.removeCallbacks(positionChecker)
+            lastPositionMs = getCurrentPositionMs() - lyricsOffsetMs
+            _state.value = _state.value.copy(isPlaying = false)
+        }
     }
 
     private fun extractAlbumColors(bitmap: Bitmap?) {
@@ -322,6 +469,8 @@ class MediaTracker private constructor(context: Context) {
 
     private fun prefetchNextSong() {
         prefetchJob?.cancel()
+        // The queue comes from the phone's player, which isn't the one playing then.
+        if (isSpotifySource) return
         prefetchJob = scope.launch(Dispatchers.IO) {
             try {
                 val controller = activeController ?: return@launch
@@ -610,6 +759,15 @@ class MediaTracker private constructor(context: Context) {
 
     companion object {
         private const val CACHE_REFRESH_MS = 7L * 24 * 60 * 60 * 1000
+
+        private const val SPOTIFY_PACKAGE = "com.spotify.music"
+        private const val SPOTIFY_POLL_MS = 3_000L
+        private const val SPOTIFY_MIN_POLL_MS = 500L
+        private const val SPOTIFY_PAUSED_POLL_MS = 5_000L
+        private const val SPOTIFY_IDLE_POLL_MS = 15_000L
+        private const val SPOTIFY_END_GRACE_MS = 400L
+        private const val SPOTIFY_COMMAND_SETTLE_MS = 400L
+        private const val SPOTIFY_MAX_DRIFT_MS = 350L
 
         @Volatile
         private var instance: MediaTracker? = null

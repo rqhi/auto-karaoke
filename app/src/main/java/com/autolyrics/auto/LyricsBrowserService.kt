@@ -22,6 +22,7 @@ import android.support.v4.media.session.PlaybackStateCompat
 import androidx.media.MediaBrowserServiceCompat
 import com.autolyrics.lyrics.Countdown
 import com.autolyrics.media.MediaTracker
+import com.autolyrics.media.PlaybackControls
 import com.autolyrics.model.LyricLine
 import com.autolyrics.model.LyricWord
 import com.autolyrics.model.LyricsState
@@ -939,6 +940,11 @@ class LyricsBrowserService : MediaBrowserServiceCompat() {
         }
     }
 
+    /** The player the lyrics follow: Spotify's API while it is the source, else the playing app. */
+    private fun controls(): PlaybackControls? =
+        if (mediaTracker.isSpotifySource) mediaTracker.controls()
+        else getActiveMediaController()?.transportControls?.let { PlaybackControls.of(it) }
+
     private inner class SessionCallback : MediaSessionCompat.Callback() {
         /**
          * Steering wheel and headset buttons. The default handling drops a key when the
@@ -964,27 +970,27 @@ class LyricsBrowserService : MediaBrowserServiceCompat() {
         }
 
         override fun onPlay() {
-            getActiveMediaController()?.transportControls?.play()
+            controls()?.play()
         }
 
         override fun onPause() {
-            getActiveMediaController()?.transportControls?.pause()
+            controls()?.pause()
         }
 
         override fun onSkipToNext() {
-            getActiveMediaController()?.transportControls?.skipToNext()
+            controls()?.skipToNext()
         }
 
         override fun onSkipToPrevious() {
-            getActiveMediaController()?.transportControls?.skipToPrevious()
+            controls()?.skipToPrevious()
         }
 
         override fun onStop() {
-            getActiveMediaController()?.transportControls?.stop()
+            controls()?.stop()
         }
 
         override fun onSeekTo(pos: Long) {
-            getActiveMediaController()?.transportControls?.seekTo(pos)
+            controls()?.seekTo(pos)
         }
 
         override fun onPlayFromMediaId(mediaId: String?, extras: Bundle?) {
@@ -1002,17 +1008,17 @@ class LyricsBrowserService : MediaBrowserServiceCompat() {
 
             when (mediaId) {
                 SONG_NEXT_ID -> {
-                    getActiveMediaController()?.transportControls?.skipToNext()
+                    controls()?.skipToNext()
                     return
                 }
                 SONG_RESTART_ID -> {
-                    getActiveMediaController()?.transportControls?.seekTo(0)
+                    controls()?.seekTo(0)
                     return
                 }
                 SONG_PREVIOUS_ID -> {
                     // Music apps restart the current song on "previous" unless it just started,
                     // so jump to the start first to make sure we really go back one song.
-                    val controls = getActiveMediaController()?.transportControls ?: return
+                    val controls = controls() ?: return
                     controls.seekTo(0)
                     scope.launch {
                         delay(PREVIOUS_SONG_DELAY_MS)
@@ -1028,7 +1034,7 @@ class LyricsBrowserService : MediaBrowserServiceCompat() {
             if (state.status != LyricsStatus.FOUND) return
             val line = state.lines.getOrNull(index) ?: return
             if (line.timeMs > 0) {
-                getActiveMediaController()?.transportControls?.seekTo(line.timeMs)
+                controls()?.seekTo(line.timeMs)
             }
         }
     }
